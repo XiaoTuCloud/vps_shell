@@ -1,57 +1,69 @@
 #!/bin/bash
-set -euo pipefail
 
-# ---------- 必须 root ----------
-if [[ $EUID -ne 0 ]]; then
-    echo "请用 root 运行：sudo bash $0" >&2
+FRPC_DIR="/root/frpc"
+FRPC_BIN="$FRPC_DIR/frpc"
+FRPC_CONF="$FRPC_DIR/frpc.toml"
+TEMP_CONF="${FRPC_CONF}.tmp"
+SERVICE_FILE="/etc/systemd/system/frpc.service"
+URL="https://raw.githubusercontent.com/XiaoTuCloud/vps_frp/refs/heads/main/frpc"
+
+# 检查 root 权限
+if [ "$EUID" -ne 0 ]; then
+    echo "❌ 请使用 root 权限运行此脚本 (sudo bash install-frpc.sh)"
     exit 1
 fi
 
-FRPC_DIR=/root/frpc
-FRPC_BIN=$FRPC_DIR/frpc
-FRPC_CONF=$FRPC_DIR/frpc.toml
-SERVICE_FILE=/etc/systemd/system/frpc.service
-URL=https://raw.githubusercontent.com/XiaoTuCloud/vps_frp/refs/heads/main/frpc
-
-# ---------- 1. 建目录 ----------
-echo "==> 创建目录 $FRPC_DIR"
+echo "==> 1. 正在准备环境..."
 mkdir -p "$FRPC_DIR"
-cd "$FRPC_DIR"
+cd "$FRPC_DIR" || exit 1
 
-# ---------- 2. 下载 frpc ----------
-echo "==> 下载 frpc ..."
-if command -v wget >/dev/null 2>&1; then
-    wget -O "$FRPC_BIN" "$URL"
-else
+echo "==> 2. 正在下载 frpc 核心文件..."
+if command -v curl >/dev/null 2>&1; then
     curl -fsSL -o "$FRPC_BIN" "$URL"
+else
+    wget -qO "$FRPC_BIN" "$URL"
 fi
 
-# ---------- 3. 加执行权限并校验 ----------
-chmod +x "$FRPC_BIN"
-if ! "$FRPC_BIN" -v >/dev/null 2>&1; then
-    echo "!! frpc 无法执行，下载可能失败（检查网络/被墙），已中止" >&2
+if [ ! -f "$FRPC_BIN" ]; then
+    echo "❌ 下载失败！请检查服务器网络是否能访问 GitHub。"
     exit 1
 fi
-echo "==> frpc 下载成功：$("$FRPC_BIN" -v 2>&1 | head -n1)"
+chmod +x "$FRPC_BIN"
 
-# ---------- 4. 交互写入 frpc.toml ----------
-echo
-echo "==> 请粘贴 frpc.toml 内容，输入单独一行 ok 并回车表示结束："
-: > "$FRPC_CONF"
+echo "==> 3. 请配置 frpc.toml"
+echo "--------------------------------------------------------"
+echo "请将你的 frpc.toml 内容粘贴到下方。"
+echo "👉 粘贴完成后，请另起一行，输入 ok 并回车。"
+echo "--------------------------------------------------------"
+
+# 清空临时文件
+> "$TEMP_CONF"
+
+# 开始读取输入
 while IFS= read -r line; do
-    [[ "$line" == "ok" ]] && break
-    printf '%s\n' "$line" >> "$FRPC_CONF"
+    # 核心兼容处理：去掉 Windows 粘贴带来的 \r 回车符
+    line="${line%$'\r'}"
+    
+    # 匹配 ok，允许后面有空格
+    if [[ "$line" =~ ^ok[[:space:]]*$ ]]; then
+        break
+    fi
+    printf '%s\n' "$line" >> "$TEMP_CONF"
 done
 
-if [[ ! -s "$FRPC_CONF" ]]; then
-    echo "!! 配置为空，已中止" >&2
+# 检查文件是否为空
+if [ ! -s "$TEMP_CONF" ]; then
+    echo "❌ 错误：未检测到配置内容，脚本退出。"
+    rm -f "$TEMP_CONF"
     exit 1
 fi
-echo "==> 已写入 $FRPC_CONF，内容如下："
-cat "$FRPC_CONF"
 
-# ---------- 5. 写 systemd service ----------
-echo "==> 写入 $SERVICE_FILE"
+# 替换正式配置
+mv "$TEMP_CONF" "$FRPC_CONF"
+echo "--------------------------------------------------------"
+echo "✅ 配置文件已成功保存至: $FRPC_CONF"
+
+echo "==> 4. 正在写入系统服务 (systemd)..."
 cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=frpc
@@ -67,13 +79,14 @@ RestartSec=5s
 WantedBy=multi-user.target
 EOF
 
-# ---------- 6. 启用并启动 ----------
+echo "==> 5. 正在启动 frpc 服务..."
 systemctl daemon-reload
-systemctl enable frpc
+systemctl enable frpc >/dev/null 2>&1
 systemctl restart frpc
-systemctl status frpc --no-pager || true
 
-echo
-echo "==> 完成。常用命令："
-echo "    systemctl status frpc"
-echo "    journalctl -u frpc -f"
+echo "--------------------------------------------------------"
+echo "🎉 安装完成！以下是服务运行状态："
+systemctl status frpc --no-pager
+
+echo -e "\n如果状态不是 active (running)，请使用以下命令查看报错日志："
+echo "journalctl -u frpc -f"
