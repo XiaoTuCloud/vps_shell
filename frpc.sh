@@ -1,6 +1,7 @@
 #!/bin/bash
 
-FRPC_DIR="/root/frpc"
+FRPC_USER="frpc"
+FRPC_DIR="/opt/frpc"
 FRPC_BIN="$FRPC_DIR/frpc"
 FRPC_CONF="$FRPC_DIR/frpc.toml"
 TEMP_CONF="${FRPC_CONF}.tmp"
@@ -12,13 +13,23 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
+# 1. 安全升级：先停止旧服务，释放文件占用
+echo "=> 正在清理旧服务..."
+systemctl stop frpc >/dev/null 2>&1
+systemctl disable frpc >/dev/null 2>&1
+
+# 2. 创建专属系统用户和目录
+if ! id "$FRPC_USER" >/dev/null 2>&1; then
+    useradd -r -s /usr/sbin/nologin -d "$FRPC_DIR" "$FRPC_USER"
+fi
 mkdir -p "$FRPC_DIR" && cd "$FRPC_DIR" || exit 1
 
-echo "==> 正在下载 frpc ..."
+# 3. 带进度条下载，防止网页终端假死
+echo "==> 正在下载 frpc (保持屏幕滚动防断连) ..."
 if command -v curl >/dev/null 2>&1; then
-    curl -fsSL -o "$FRPC_BIN" "$URL"
+    curl -fL -4 --retry 3 --progress-bar -o "$FRPC_BIN" "$URL"
 else
-    wget -qO "$FRPC_BIN" "$URL"
+    wget --tries=3 --show-progress -O "$FRPC_BIN" "$URL"
 fi
 
 if [ ! -f "$FRPC_BIN" ]; then
@@ -26,19 +37,20 @@ if [ ! -f "$FRPC_BIN" ]; then
     exit 1
 fi
 chmod +x "$FRPC_BIN"
+chown -R "$FRPC_USER:$FRPC_USER" "$FRPC_DIR"
 
+# 4. 读取配置文件（保留你的消毒逻辑）
 echo "==> 请粘贴 frpc.toml 内容，输入单独一行 ok 并回车："
 > "$TEMP_CONF"
 
 while IFS= read -r line; do
-    # 【消毒 1】删掉所有的 DEL 控制字符 (八进制 177)
+    # 删掉所有的 DEL 控制字符 (八进制 177)
     line=$(printf '%s' "$line" | tr -d '\177')
-    
-    # 【消毒 2】去除 Windows 回车符 (\r)
+    # 去除 Windows 回车符 (\r)
     line="${line%$'\r'}"
     
     if [ ! -s "$TEMP_CONF" ]; then
-        # 【消毒 3】如果是第一行，去掉 BOM 头和任何不可见的控制字符
+        # 如果是第一行，去掉 BOM 头和任何不可见的控制字符
         line=$(printf '%s' "$line" | sed '1s/^\xEF\xBB\xBF//; 1s/^[[:cntrl:][:space:]]*//')
     fi
 
@@ -52,19 +64,30 @@ if [ ! -s "$TEMP_CONF" ]; then
     exit 1
 fi
 mv "$TEMP_CONF" "$FRPC_CONF"
+chown "$FRPC_USER:$FRPC_USER" "$FRPC_CONF"
+chmod 600 "$FRPC_CONF"
 
+# 5. 写入更安全、带日志限制的 Systemd 服务
 echo "==> 正在写入系统服务..."
 cat > "$SERVICE_FILE" << EOF
 [Unit]
-Description=frpc
+Description=frpc client
 After=network.target
 
 [Service]
 Type=simple
+User=$FRPC_USER
+Group=$FRPC_USER
 WorkingDirectory=$FRPC_DIR
 ExecStart=$FRPC_BIN -c $FRPC_CONF
-Restart=on-failure
+Restart=always
 RestartSec=5s
+
+# 日志防爆磁盘限制
+StandardOutput=journal
+StandardError=journal
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=1000
 
 [Install]
 WantedBy=multi-user.target
