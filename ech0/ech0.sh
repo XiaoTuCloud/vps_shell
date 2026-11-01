@@ -1,11 +1,10 @@
 #!/bin/bash
 
-# ================= 配置区 =================
-DOWNLOAD_URL="https://github.com/XiaoTuCloud/vps_shell/releases/download/v1.0.0/ech0-linux-amd64"
+# ================= 基础配置区 =================
 APP_USER="ech0"
 APP_DIR="/opt/ech0"
 BIN_PATH="/usr/local/bin/ech0"
-# ==========================================
+# ==============================================
 
 echo "======================================"
 echo "开始一键部署 Ech0 (./ech0 serve 模式)..."
@@ -17,21 +16,36 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-# 2. 清理旧的服务配置（保留数据目录 /opt/ech0/data）
+# 2. 自动识别架构并设置下载链接
+ARCH=$(uname -m)
+echo "=> [0/7] 正在检测系统架构..."
+if [[ "$ARCH" == "x86_64" || "$ARCH" == "amd64" ]]; then
+    echo "✅ 检测到架构: AMD64 (x86_64)"
+    DOWNLOAD_URL="https://github.com/XiaoTuCloud/vps_shell/releases/download/v1.0.0/ech0-linux-amd64"
+elif [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" ]]; then
+    echo "✅ 检测到架构: ARM64 (aarch64)"
+    DOWNLOAD_URL="https://github.com/XiaoTuCloud/vps_shell/releases/download/v1.0.0/ech0-linux-arm64"
+else
+    echo "❌ 错误：暂不支持当前系统架构 ($ARCH)！"
+    exit 1
+fi
+
+# 3. 清理旧的服务配置（保留数据目录 /opt/ech0/data）
 echo "=> [1/7] 正在清理旧的 systemd 服务..."
 systemctl stop ech0 >/dev/null 2>&1
 systemctl disable ech0 >/dev/null 2>&1
 rm -f /etc/systemd/system/ech0.service
 systemctl daemon-reload
 
-# 3. 创建专用系统用户和目录
+# 4. 创建专用系统用户和目录
 echo "=> [2/7] 创建用户和目录..."
 id "$APP_USER" >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin -d "$APP_DIR" "$APP_USER"
 mkdir -p "$APP_DIR/data" /etc/ech0
 chown -R "$APP_USER:$APP_USER" "$APP_DIR"
 
-# 4. 下载二进制文件
+# 5. 下载二进制文件
 echo "=> [3/7] 正在下载 Ech0 程序..."
+echo "下载链接: $DOWNLOAD_URL"
 if ! wget -O "$BIN_PATH" "$DOWNLOAD_URL"; then
     echo "❌ 下载失败，请检查网络或链接。"
     exit 1
@@ -39,7 +53,7 @@ fi
 chmod +x "$BIN_PATH"
 chown "$APP_USER:$APP_USER" "$BIN_PATH"
 
-# 5. 配置环境变量（固定 JWT_SECRET）
+# 6. 配置环境变量（固定 JWT_SECRET）
 echo "=> [4/7] 配置 JWT_SECRET..."
 if [ ! -s /etc/ech0/ech0.env ]; then
     SECRET=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | base64 | tr -d '\n')
@@ -50,7 +64,7 @@ else
 fi
 chmod 600 /etc/ech0/ech0.env
 
-# 6. 写入 Systemd 服务文件（核心：ExecStart 使用 serve 参数）
+# 7. 写入 Systemd 服务文件（核心：ExecStart 使用 serve 参数）
 echo "=> [5/7] 配置 Systemd 服务..."
 cat > /etc/systemd/system/ech0.service <<EOF
 [Unit]
@@ -78,13 +92,13 @@ LogRateLimitBurst=1000
 WantedBy=multi-user.target
 EOF
 
-# 7. 启动服务
+# 8. 启动服务
 echo "=> [6/7] 启动服务并设置开机自启..."
 systemctl daemon-reload
 systemctl enable ech0 >/dev/null 2>&1
 systemctl restart ech0
 
-# 8. 结果检查
+# 9. 结果检查
 echo "=> [7/7] 检查服务状态..."
 sleep 2
 if systemctl is-active --quiet ech0; then
